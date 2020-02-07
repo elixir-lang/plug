@@ -13,8 +13,19 @@ defmodule Plug.Session.CookieTest do
   ]
 
   @secret String.duplicate("abcdef0123456789", 8)
-  @signing_opts Plug.Session.init(Keyword.put(@default_opts, :encrypt, false))
+  @active_secrets [
+    String.duplicate("ghijkl0123456789", 8),
+    String.duplicate("mnopqr0123456789", 8)
+  ]
+
+  opts = Keyword.put(@default_opts, :encrypt, false)
+  @signing_opts Plug.Session.init(opts)
+  opts = Keyword.put(opts, :active_secret_key_bases, @active_secrets)
+  @rotating_signing_opts Plug.Session.init(opts)
+
   @encrypted_opts Plug.Session.init(@default_opts)
+  opts = Keyword.put(@default_opts, :active_secret_key_bases, @active_secrets)
+  @rotating_encrypted_opts Plug.Session.init(opts)
 
   defmodule CustomSerializer do
     def encode(%{"foo" => "bar"}), do: {:ok, "encoded session"}
@@ -31,15 +42,15 @@ defmodule Plug.Session.CookieTest do
   opts = Keyword.put(@default_opts, :serializer, CustomSerializer)
   @custom_serializer_opts Plug.Session.init(opts)
 
-  defp sign_conn(conn, secret \\ @secret) do
+  defp sign_conn(conn, secret \\ @secret, opts \\ @signing_opts) do
     put_in(conn.secret_key_base, secret)
-    |> Plug.Session.call(@signing_opts)
+    |> Plug.Session.call(opts)
     |> fetch_session
   end
 
-  defp encrypt_conn(conn) do
-    put_in(conn.secret_key_base, @secret)
-    |> Plug.Session.call(@encrypted_opts)
+  defp encrypt_conn(conn, secret \\ @secret, opts \\ @encrypted_opts) do
+    put_in(conn.secret_key_base, secret)
+    |> Plug.Session.call(opts)
     |> fetch_session
   end
 
@@ -152,6 +163,19 @@ defmodule Plug.Session.CookieTest do
            |> get_session("foo") == nil
   end
 
+  test "gets (with active secret) and sets (with primary secret) signed session cookie" do
+    conn =
+      conn(:get, "/")
+      |> sign_conn(Enum.at(@active_secrets, 1))
+      |> put_session("foo", "bar")
+      |> send_resp(200, "")
+
+    assert conn(:get, "/")
+           |> recycle_cookies(conn)
+           |> sign_conn(@secret, @rotating_signing_opts)
+           |> get_session("foo") == "bar"
+  end
+
   ## Encrypted
 
   test "session cookies are encrypted" do
@@ -190,6 +214,19 @@ defmodule Plug.Session.CookieTest do
            |> recycle_cookies(conn)
            |> encrypt_conn()
            |> get_session("foo") == nil
+  end
+
+  test "gets (with active secret) and sets (with primary secret) encrypted session cookie" do
+    conn =
+      conn(:get, "/")
+      |> encrypt_conn(Enum.at(@active_secrets, 0))
+      |> put_session("foo", "bar")
+      |> send_resp(200, "")
+
+    assert conn(:get, "/")
+           |> recycle_cookies(conn)
+           |> encrypt_conn(@secret, @rotating_encrypted_opts)
+           |> get_session("foo") == "bar"
   end
 
   ## Custom Serializer

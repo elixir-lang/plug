@@ -37,7 +37,17 @@ defmodule Plug.Session.COOKIE do
 
     * `:serializer` - cookie serializer module that defines `encode/1` and
       `decode/1` returning an `{:ok, value}` tuple. Defaults to
-      `:external_term_format`.
+      `:external_term_format`;
+
+    * `:active_secret_key_bases` - a list of secret key bases that are active
+      for decrypting and verifying a cookie in addition to `:secret_key_base`.
+      These are not used for encrypting or signing. Use this when rotating the
+      secret key base so that cookies encrypted/signed by a key base other than
+      the current `:secret_key_base` are not invalidated and can be read. The
+      list will be tried in order after the `:secret_key_base` to
+      decrypt/verify. When a cookie is updated the `:secret_key_base` is always
+      used to encrypt/sign. Can be either a list of binaries or an MFA
+      returning a list of binaries. Defaults to `[]`;
 
     * `:log` - Log level to use when the cookie cannot be decoded.
       Defaults to `:debug`, can be set to false to disable it.
@@ -63,6 +73,7 @@ defmodule Plug.Session.COOKIE do
   def init(opts) do
     encryption_salt = opts[:encryption_salt]
     signing_salt = check_signing_salt(opts)
+    active_secrets = opts[:active_secret_key_bases] || []
 
     iterations = Keyword.get(opts, :key_iterations, 1000)
     length = Keyword.get(opts, :key_length, 32)
@@ -75,6 +86,7 @@ defmodule Plug.Session.COOKIE do
     %{
       encryption_salt: encryption_salt,
       signing_salt: signing_salt,
+      active_secret_key_bases: active_secrets,
       key_opts: key_opts,
       serializer: serializer,
       log: log
@@ -82,20 +94,53 @@ defmodule Plug.Session.COOKIE do
   end
 
   def get(conn, cookie, opts) do
-    %{key_opts: key_opts, signing_salt: signing_salt, log: log, serializer: serializer} = opts
+    %{
+      key_opts: key_opts,
+      signing_salt: signing_salt,
+      active_secret_key_bases: active_secrets,
+      log: log,
+      serializer: serializer
+    } = opts
 
     case opts do
       %{encryption_salt: nil} ->
-        MessageVerifier.verify(cookie, derive(conn, get_mfa(signing_salt), key_opts))
+        active_secrets_list = get_mfa(active_secrets)
+        signing_salt_bin = get_mfa(signing_salt)
+
+        get_with_actives(conn, active_secrets_list, fn conn2 ->
+          MessageVerifier.verify(cookie, derive(conn2, signing_salt_bin, key_opts))
+        end)
 
       %{encryption_salt: key} ->
-        MessageEncryptor.decrypt(
-          cookie,
-          derive(conn, get_mfa(key), key_opts),
-          derive(conn, get_mfa(signing_salt), key_opts)
-        )
+        active_secrets_list = get_mfa(active_secrets)
+        signing_salt_bin = get_mfa(signing_salt)
+        key_bin = get_mfa(key)
+
+        get_with_actives(conn, active_secrets_list, fn conn2 ->
+          MessageEncryptor.decrypt(
+            cookie,
+            derive(conn2, key_bin, key_opts),
+            derive(conn2, signing_salt_bin, key_opts)
+          )
+        end)
     end
     |> decode(serializer, log)
+  end
+
+  defp get_with_actives(conn, active_secrets, msg_getter) do
+    case msg_getter.(conn) do
+      {:ok, _} = ok ->
+        ok
+
+      :error when is_list(active_secrets) and active_secrets != [] ->
+        [next_secret | rest_secrets] = active_secrets
+
+        put_in(conn.secret_key_base, next_secret)
+        |> get_with_actives(rest_secrets, msg_getter)
+
+      :error ->
+        :error
+    end
   end
 
   def put(conn, _sid, term, opts) do
