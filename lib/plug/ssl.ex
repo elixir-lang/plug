@@ -242,9 +242,18 @@ defmodule Plug.SSL do
   end
 
   defp set_secure_defaults(options) do
-    options
-    |> Keyword.put_new(:secure_renegotiate, true)
-    |> Keyword.put_new(:reuse_sessions, true)
+    if options[:versions] == [:"tlsv1.3"] do
+      # secure_renegotiate and reuse_sessions options are not supported
+      # by the OTP SSL module when earlier versions of TLS are not being used.
+      # (i.e. TLS1.2 or earlier versions must be specified as it's not supported in TLS1.3)
+      options
+      |> Keyword.delete(:secure_renegotiate)
+      |> Keyword.delete(:reuse_sessions)
+    else
+      options
+      |> Keyword.put_new(:secure_renegotiate, true)
+      |> Keyword.put_new(:reuse_sessions, true)
+    end
   end
 
   defp configure_managed_tls(options) do
