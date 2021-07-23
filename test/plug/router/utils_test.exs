@@ -10,6 +10,10 @@ defmodule Plug.Router.UtilsTest do
     R.build_path_match(route, Plug.Router.Utils)
   end
 
+  defp build_path_head(route, guard) do
+    R.build_path_head(route, guard, Plug.Router.Utils)
+  end
+
   test "split on root" do
     assert R.split("/") == []
     assert R.split("") == []
@@ -84,5 +88,59 @@ defmodule Plug.Router.UtilsTest do
     assert_raise Plug.Router.InvalidSpecError,
                  "cannot have a *glob followed by other segments",
                  fn -> build_path_match("/foo/*bar/baz") end
+  end
+
+  test "parse invalid dynamic segments containing dynamic suffix" do
+    assert_raise Plug.Router.InvalidSpecError,
+                 "dynamic suffix (:json) is unsupported",
+                 fn -> R.parse_segments("/foo/:bar-:json") end
+
+    assert_raise Plug.Router.InvalidSpecError,
+                 "dynamic suffix (:location) is unsupported",
+                 fn -> R.parse_segments("/foo/:user@:location") end
+  end
+
+  test "parse invalid dynamic segments containing invalid suffix character" do
+    assert_raise Plug.Router.InvalidSpecError,
+                 "invalid character \":\" in suffix",
+                 fn -> R.parse_segments("/foo/:bar.js.:json") end
+  end
+
+  test "build path head with dynamic suffix identifier and injected guard" do
+    segments = R.parse_segments("/foo/:bar.json")
+    params = R.build_path_params_match(segments)
+    match = quote(@opts, do: ["foo", bar])
+    assert {^match, ^params, new_guard} = build_path_head("/foo/:bar.json", true)
+
+    assert quote(@opts,
+             do:
+               binary_part(
+                 unquote(Macro.var(:bar, nil)),
+                 byte_size(unquote(Macro.var(:bar, nil))) - byte_size(unquote(".json")),
+                 byte_size(unquote(".json"))
+               ) == unquote(".json")
+           ) == new_guard
+  end
+
+  test "build path head with dynamic suffix identifier with boolean guards" do
+    guards = quote(@opts, do: bar == "value" and is_binary(bar))
+    assert {_match, _params, new_guard} = build_path_head("/foo/:bar.json", guards)
+
+    assert quote(@opts,
+             do:
+               binary_part(
+                 unquote(Macro.var(:bar, nil)),
+                 byte_size(unquote(Macro.var(:bar, nil))) - byte_size(unquote(".json")),
+                 byte_size(unquote(".json"))
+               ) == unquote(".json") and (bar == "value.json" and is_binary(bar))
+           ) == new_guard
+  end
+
+  test "build path head with dynamic suffix identifier with unsupported guard" do
+    unsupported_guard = quote(@opts, do: byte_size(bar))
+
+    assert_raise Plug.Router.InvalidSpecError,
+                 ":byte_size currently is an unsupported guard function for :bar suffix identifier",
+                 fn -> build_path_head("/foo/:bar.json", unsupported_guard) end
   end
 end
